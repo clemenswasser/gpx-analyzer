@@ -1,5 +1,4 @@
 use geo::algorithm::haversine_distance::HaversineDistance;
-use std::io::Write;
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
@@ -11,17 +10,18 @@ struct Opt {
     pub lat: f64,
     #[structopt(short, long)]
     pub distance: f64,
-    #[structopt(short = "j", long, default_value = "1")]
-    pub threads: usize,
+    #[structopt(short, long)]
+    pub path: std::path::PathBuf,
+    #[structopt(short = "j", long)]
+    pub threads: Option<usize>
 }
 
 struct Result {
     distance: f64,
     path: String,
-    //time: std::
 }
 
-fn analyze(path: std::path::PathBuf, lon: f64, lat: f64) -> Result {
+fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64) -> Result {
     let mut reader = quick_xml::Reader::from_file(&path).unwrap();
     reader.trim_text(true);
     let mut buf = Vec::new();
@@ -67,9 +67,7 @@ fn analyze(path: std::path::PathBuf, lon: f64, lat: f64) -> Result {
                 }
             }
 
-            Ok(quick_xml::events::Event::Text(e)) => {
-                //println!("{}", e.unescape_and_decode(&reader).unwrap());
-            }
+            Ok(quick_xml::events::Event::Text(_)) => {}
             Ok(quick_xml::events::Event::Eof) => {
                 return Result {
                     distance: nearest_dist,
@@ -87,134 +85,75 @@ fn analyze(path: std::path::PathBuf, lon: f64, lat: f64) -> Result {
     }
 }
 
-fn read_dir(
-    entries: std::fs::ReadDir,
-    lon: f64,
-    lat: f64,
-    distance: f64,
-    all_tasks: std::sync::Arc<std::sync::Mutex<u64>>,
-    finished_tasks: std::sync::Arc<std::sync::Mutex<u64>>,
-    nearest_out_of_dist: std::sync::Arc<std::sync::Mutex<Result>>,
-    search_result_send: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Sender<Result>>>,
-) {
-    entries.for_each(move |entry| {
-        let all_tasks = all_tasks.clone();
-        let finished_tasks = finished_tasks.clone();
-        let nearest_out_of_dist = nearest_out_of_dist.clone();
-        let search_result_send = search_result_send.clone();
-        rayon::scope(move |s| {
-            let entry = entry.unwrap();
-            let metadata = entry.metadata().unwrap();
-            if metadata.is_dir() {
-                s.spawn(move |_| {
-                    read_dir(
-                        std::fs::read_dir((&entry).path()).unwrap(),
-                        lon,
-                        lat,
-                        distance,
-                        all_tasks,
-                        finished_tasks,
-                        nearest_out_of_dist,
-                        search_result_send,
-                    )
-                });
-            } else if entry.path().to_str().unwrap().ends_with(".gpx") {
-                *all_tasks.lock().unwrap() += 1;
-                s.spawn(move |_| {
-                    let res = analyze(entry.path(), lon, lat);
-                    if res.distance <= distance {
-                        search_result_send.lock().unwrap().send(res).unwrap();
-                    } else {
-                        let mut dist = nearest_out_of_dist.lock().unwrap();
-                        if dist.distance > res.distance {
-                            dist.distance = res.distance;
-                            dist.path = res.path;
-                        }
-                    }
+use rayon::prelude::*;
 
-                    *finished_tasks.lock().unwrap() += 1;
-                });
+fn read_dir_db(path: &std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    let dir_entrys = std::fs::read_dir(path).unwrap();
+    let mut results = Vec::<std::path::PathBuf>::new();
+    for dir_entry in dir_entrys {
+        let dir_entry = dir_entry.unwrap();
+        if dir_entry.metadata().unwrap().is_dir() {
+            results.extend(read_dir_db(&dir_entry.path()));
+        } else if let Some(ext) = dir_entry.path().extension() {
+            if ext.eq("gpx") {
+                results.push(dir_entry.path());
             }
-        })
-    });
+        }
+    }
+    results
 }
 
 fn main() {
     let opt = Opt::from_args();
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(opt.threads + 1)
-        .build()
-        .unwrap();
-    let all_tasks = std::sync::Arc::new(std::sync::Mutex::new(0));
-    let finished_tasks = std::sync::Arc::new(std::sync::Mutex::new(0));
-    let (send, recv) = std::sync::mpsc::channel::<()>();
-    let send = std::sync::Arc::new(std::sync::Mutex::new(send));
-    let recv = std::sync::Arc::new(std::sync::Mutex::new(recv));
 
-    let nearest_out_of_dist = std::sync::Arc::new(std::sync::Mutex::new(Result {
-        distance: std::f64::MAX,
-        path: String::new(),
-    }));
+    if opt.threads.is_some() {
+        rayon::ThreadPoolBuilder::new().num_threads(opt.threads.unwrap()).build_global().unwrap();
+    }
 
-    let (search_result_send, search_results_recv) = std::sync::mpsc::channel::<Result>();
-    let search_result_send = std::sync::Arc::new(std::sync::Mutex::new(search_result_send));
-    let search_results_recv = std::sync::Arc::new(std::sync::Mutex::new(search_results_recv));
-    pool.scope(|s| {
-        s.spawn(|_| {
-            let recv = recv.clone();
-            while match recv
-                .lock()
-                .unwrap()
-                .recv_timeout(std::time::Duration::from_millis(250))
-            {
-                Ok(_) => false,
-                Err(_) => true,
-            } {
-                print!(
-                    "{}/{}\r",
-                    finished_tasks.lock().unwrap(),
-                    all_tasks.lock().unwrap()
-                );
-                std::io::stdout().flush().unwrap();
-            }
+    let analyze_db = read_dir_db(&opt.path);
 
-            let results = search_results_recv
-                .lock()
-                .unwrap()
-                .try_iter()
-                .collect::<Vec<_>>();
+    println!("Found {} gpx files", analyze_db.len());
 
-            if results.len() > 0 {
-                println!(
-                    "Found {} Points in your defined minimum distance ({}m):",
-                    results.len(),
-                    opt.distance
-                );
-                results.iter().for_each(|result| {
-                    println!("{:.1}m in file: {}", result.distance, result.path)
-                });
-            } else {
-                println!(
-                    "Did not find any Points in your defined minimum distance.\n{}",
-                    "Closest was:"
-                );
-                let dist = nearest_out_of_dist.lock().unwrap();
-                println!("{:.1}m in file: {}", dist.distance, dist.path,);
-            }
-        });
-        s.spawn(|_| {
-            let send = send.clone();
-            read_dir(
-                std::fs::read_dir(".").unwrap(),
-                opt.lon,
-                opt.lat,
-                opt.distance,
-                all_tasks.clone(),
-                finished_tasks.clone(),
-                nearest_out_of_dist.clone(),
-                search_result_send.clone(),
+    let mut results = analyze_db
+        .par_iter()
+        .map(|gpx_file| analyze(gpx_file, opt.lon, opt.lat))
+        .collect::<Vec<_>>();
+
+    results
+        .sort_by(|result_1, result_2| result_1.distance.partial_cmp(&result_2.distance).unwrap());
+
+    let filtered_results = results
+        .par_iter()
+        .filter(|result| result.distance <= opt.distance)
+        .collect::<Vec<_>>();
+
+    if filtered_results.len() > 0 {
+        println!(
+            "Found {} Points in your defined minimum distance ({}m):",
+            filtered_results.len(),
+            opt.distance
+        );
+        filtered_results
+            .iter()
+            .for_each(|result| println!("{:.1}m in file: {}", result.distance, result.path));
+
+        let out_range_index = filtered_results.len();
+        std::mem::drop(filtered_results);
+
+        if let Some(result) = results.get(out_range_index) {
+            println!(
+                "Nearest out of distance was:\n\
+                {:.1}m in file: {}",
+                result.distance, result.path
             );
-            send.lock().unwrap().send(()).unwrap();
-        });
-    });
+        }
+    } else {
+        println!(
+            "Did not find any Points in your defined minimum distance.\n\
+            Closest was:"
+        );
+        std::mem::drop(filtered_results);
+        let result = results.first().unwrap();
+        println!("{:.1}m in file: {}", result.distance, result.path);
+    }
 }
