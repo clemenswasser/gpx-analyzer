@@ -11,9 +11,9 @@ struct Opt {
     #[structopt(short, long)]
     pub distance: f64,
     #[structopt(short, long)]
-    pub path: std::path::PathBuf,
+    pub path: Option<std::path::PathBuf>,
     #[structopt(short = "j", long)]
-    pub threads: Option<usize>
+    pub threads: Option<usize>,
 }
 
 struct Result {
@@ -87,49 +87,65 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64) -> Result {
 
 use rayon::prelude::*;
 
-fn read_dir_db(path: &std::path::PathBuf) -> Vec<std::path::PathBuf> {
-    let dir_entrys = std::fs::read_dir(path).unwrap();
-    let mut results = Vec::<std::path::PathBuf>::new();
-    for dir_entry in dir_entrys {
-        let dir_entry = dir_entry.unwrap();
-        if dir_entry.metadata().unwrap().is_dir() {
-            results.extend(read_dir_db(&dir_entry.path()));
-        } else if let Some(ext) = dir_entry.path().extension() {
-            if ext.eq("gpx") {
-                results.push(dir_entry.path());
+fn read_dir_db(path: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    if std::fs::metadata(&path).unwrap().is_dir() {
+        let dir_entrys = std::fs::read_dir(path).unwrap();
+        let mut results = Vec::<std::path::PathBuf>::new();
+        for dir_entry in dir_entrys {
+            let dir_entry = dir_entry.unwrap();
+            if dir_entry.metadata().unwrap().is_dir() {
+                results.extend(read_dir_db(dir_entry.path()));
+            } else if let Some(ext) = dir_entry.path().extension() {
+                if ext.eq("gpx") {
+                    results.push(dir_entry.path());
+                }
             }
         }
+        results
+    } else if path.extension().unwrap().eq("gpx") {
+        vec![path]
+    } else {
+        panic!();
     }
-    results
 }
 
 fn main() {
     let opt = Opt::from_args();
 
     if opt.threads.is_some() {
-        rayon::ThreadPoolBuilder::new().num_threads(opt.threads.unwrap()).build_global().unwrap();
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(opt.threads.unwrap())
+            .build_global()
+            .unwrap();
     }
 
-    let analyze_db = read_dir_db(&opt.path);
+    let analyze_db = read_dir_db(opt.path.unwrap_or(".".into()));
 
-    println!("Found {} gpx files", analyze_db.len());
+    println!(
+        "Found {} gpx file(s).\n\
+        Searching...",
+        analyze_db.len()
+    );
 
+    let lon = opt.lon;
+    let lat = opt.lat;
     let mut results = analyze_db
         .par_iter()
-        .map(|gpx_file| analyze(gpx_file, opt.lon, opt.lat))
+        .map(|gpx_file| analyze(gpx_file, lon, lat))
         .collect::<Vec<_>>();
 
     results
         .sort_by(|result_1, result_2| result_1.distance.partial_cmp(&result_2.distance).unwrap());
 
+    let distance = opt.distance;
     let filtered_results = results
         .par_iter()
-        .filter(|result| result.distance <= opt.distance)
+        .filter(|result| result.distance <= distance)
         .collect::<Vec<_>>();
 
     if filtered_results.len() > 0 {
         println!(
-            "Found {} Points in your defined minimum distance ({}m):",
+            "Found {} point(s) in your defined minimum distance ({}m):",
             filtered_results.len(),
             opt.distance
         );
@@ -142,14 +158,14 @@ fn main() {
 
         if let Some(result) = results.get(out_range_index) {
             println!(
-                "Nearest out of distance was:\n\
+                "Nearest point out of distance was:\n\
                 {:.1}m in file: {}",
                 result.distance, result.path
             );
         }
     } else {
         println!(
-            "Did not find any Points in your defined minimum distance.\n\
+            "Did not find any point in your defined minimum distance.\n\
             Closest was:"
         );
         std::mem::drop(filtered_results);
