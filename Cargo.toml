@@ -1,0 +1,13 @@
+[package]
+name = "rust-gpx"
+version = "0.1.0"
+authors = ["cleme"]
+edition = "2018"
+
+[dependencies]
+rayon = "*"
+quick-xml = "*"
+geo-types = "*"
+geo = "*"
+structopt = { version = "*", features = [ "paw" ] }
+paw = "*"
