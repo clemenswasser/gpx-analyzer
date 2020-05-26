@@ -105,7 +105,7 @@ fn read_dir_db(path: std::path::PathBuf) -> Vec<std::path::PathBuf> {
     } else if path.extension().unwrap().eq("gpx") {
         vec![path]
     } else {
-        panic!();
+        panic!("Your specified Path is neither a directory nor a gpx file");
     }
 }
 
