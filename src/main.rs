@@ -1,13 +1,20 @@
-use geo::algorithm::haversine_distance::HaversineDistance;
+use geo::prelude::*;
 use structopt::StructOpt;
+
+/*enum Coordinates {
+    LatLon(f64, f64),
+    Coordinates(String),
+}*/
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "gpx-analyzer")]
 struct Opt {
-    #[structopt(long)]
-    pub lon: f64,
-    #[structopt(long)]
-    pub lat: f64,
+    #[structopt(long, conflicts_with = "coordinates")]
+    pub longitude: Option<String>,
+    #[structopt(long, conflicts_with = "coordinates")]
+    pub latitude: Option<String>,
+    #[structopt(short, long, conflicts_with = "longitude latitude")]
+    pub coordinates: Option<String>,
     #[structopt(short, long)]
     pub distance: f64,
     #[structopt(short, long)]
@@ -19,6 +26,7 @@ struct Opt {
 struct Result {
     distance: f64,
     path: String,
+    time: String,
 }
 
 fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64) -> Result {
@@ -27,6 +35,8 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64) -> Result {
     let mut buf = Vec::new();
 
     let mut nearest_dist = std::f64::MAX;
+    let mut time_update = false;
+    let mut nearest_time = String::new();
 
     loop {
         match reader.read_event(&mut buf) {
@@ -63,7 +73,12 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64) -> Result {
 
                     if nearest_dist > dist {
                         nearest_dist = dist;
+                        time_update = true;
                     }
+                } else if e.name().eq(b"time") && time_update {
+                    let time = reader.read_text(e.name(), &mut Vec::new()).unwrap();
+                    //dbg!(&time);
+                    nearest_time = time;
                 }
             }
 
@@ -72,6 +87,7 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64) -> Result {
                 return Result {
                     distance: nearest_dist,
                     path: path.to_str().unwrap().into(),
+                    time: nearest_time,
                 };
             }
             Err(e) => panic!(
@@ -109,8 +125,63 @@ fn read_dir_db(path: std::path::PathBuf) -> Vec<std::path::PathBuf> {
     }
 }
 
+fn parse_deg_min_sec(input: String) -> f64 {
+    let mut split = input
+        .split(" ")
+        .map(|str| str.to_string())
+        .collect::<Vec<_>>();
+    let mut param = split.remove(0);
+    let south = param.remove(0).eq(&'S');
+
+    let mut out =
+        param.parse::<f64>().unwrap() + split.get(0).unwrap().parse::<f64>().unwrap() / 60.0;
+    if south {
+        out *= -1.0;
+    };
+    out
+}
+
+fn print_result(result: &Result) {
+    let mut time_split = result.time.split("T");
+    let date = time_split.next().unwrap();
+    let mut time = time_split.next().unwrap().to_string();
+    time.remove(time.len() - 1);
+    println!("{:.1};{};{};{}", result.distance, time, date, result.path);
+}
+
 fn main() {
     let opt = Opt::from_args();
+
+    let (latitude, longitude) =
+        if let (Some(longitude), Some(latitude)) = (opt.longitude, opt.latitude) {
+            (
+                match latitude.parse::<f64>() {
+                    Ok(latitude) => latitude,
+                    Err(_) => parse_deg_min_sec(latitude),
+                },
+                match longitude.parse::<f64>() {
+                    Ok(longitude) => longitude,
+                    Err(_) => parse_deg_min_sec(longitude),
+                },
+            )
+        } else if let Some(coordinates) = opt.coordinates {
+            let split = coordinates
+                .split(" ")
+                .map(|split| split.to_string())
+                .collect::<Vec<_>>();
+            if let (Ok(latitude), Ok(longitude)) = (
+                split.get(0).unwrap().parse::<f64>(),
+                split.get(1).unwrap().parse::<f64>(),
+            ) {
+                (latitude, longitude)
+            } else {
+                let first = split.get(0).unwrap().to_string() + " " + split.get(1).unwrap();
+                let second = split.get(2).unwrap().to_string() + " " + split.get(3).unwrap();
+                (parse_deg_min_sec(first), parse_deg_min_sec(second))
+            }
+        } else {
+            panic!("You must specify either --longitude and --latitude or --coordinates");
+        };
 
     if opt.threads.is_some() {
         rayon::ThreadPoolBuilder::new()
@@ -127,11 +198,9 @@ fn main() {
         analyze_db.len()
     );
 
-    let lon = opt.lon;
-    let lat = opt.lat;
     let mut results = analyze_db
         .par_iter()
-        .map(|gpx_file| analyze(gpx_file, lon, lat))
+        .map(|gpx_file| analyze(gpx_file, longitude, latitude))
         .collect::<Vec<_>>();
 
     results
@@ -151,17 +220,14 @@ fn main() {
         );
         filtered_results
             .iter()
-            .for_each(|result| println!("{:.1}m in file: {}", result.distance, result.path));
+            .for_each(|result| print_result(result));
 
         let out_range_index = filtered_results.len();
         std::mem::drop(filtered_results);
 
         if let Some(result) = results.get(out_range_index) {
-            println!(
-                "Nearest point out of distance was:\n\
-                {:.1}m in file: {}",
-                result.distance, result.path
-            );
+            println!("Nearest point out of distance was:");
+            print_result(result);
         }
     } else {
         println!(
@@ -169,7 +235,6 @@ fn main() {
             Closest was:"
         );
         std::mem::drop(filtered_results);
-        let result = results.first().unwrap();
-        println!("{:.1}m in file: {}", result.distance, result.path);
+        print_result(results.first().unwrap());
     }
 }
