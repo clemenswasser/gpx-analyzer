@@ -32,7 +32,7 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64, distance: f64) -> Vec<
     let mut results = Vec::new();
     let mut nearest_dist = std::f64::MAX;
     let mut time_update = false;
-    let mut nearest_time = String::new();
+    let mut nearest_time = None;
 
     loop {
         match reader.read_event(&mut buf) {
@@ -80,7 +80,10 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64, distance: f64) -> Vec<
                     }
                 } else if e.name().eq(b"time") && time_update {
                     let time = reader.read_text(e.name(), &mut Vec::new()).unwrap();
-                    nearest_time = time.clone();
+                    if time.eq("") {
+                        continue;
+                    }
+                    nearest_time = Some(time.clone());
                     if let Some(last) = results.last_mut() {
                         if last.time.is_none() {
                             last.time = Some(time);
@@ -97,7 +100,7 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64, distance: f64) -> Vec<
                     return vec![Result {
                         distance: nearest_dist,
                         path: path.to_str().unwrap().into(),
-                        time: Some(nearest_time),
+                        time: nearest_time,
                     }];
                 }
             }
@@ -162,7 +165,10 @@ fn print_result(result: &Result) {
         time.remove(time.len() - 1);
         println!("{:.1};{};{};{}", result.distance, time, date, result.path);
     } else {
-        println!("{:.1};{};{};{}", result.distance, "00:00:00", "0000-00-00", result.path);
+        println!(
+            "{:.1};{};{};{}",
+            result.distance, "00:00:00", "0000-00-00", result.path
+        );
     }
 }
 
@@ -222,8 +228,15 @@ fn main() {
         .par_iter()
         .map(|gpx_file| analyze(gpx_file, longitude, latitude, distance))
         .collect::<Vec<_>>();
-    let mut results = Vec::with_capacity(analysis_results.iter().map(|result_vec| result_vec.len()).sum());
-    analysis_results.iter().for_each(|result| results.extend(result));
+    let mut results = Vec::with_capacity(
+        analysis_results
+            .iter()
+            .map(|result_vec| result_vec.len())
+            .sum(),
+    );
+    analysis_results
+        .iter()
+        .for_each(|result| results.extend(result));
 
     results
         .sort_by(|result_1, result_2| result_1.distance.partial_cmp(&result_2.distance).unwrap());
