@@ -1,11 +1,6 @@
 use geo::prelude::*;
 use structopt::StructOpt;
 
-/*enum Coordinates {
-    LatLon(f64, f64),
-    Coordinates(String),
-}*/
-
 #[derive(Debug, StructOpt)]
 #[structopt(name = "gpx-analyzer")]
 struct Opt {
@@ -26,14 +21,15 @@ struct Opt {
 struct Result {
     distance: f64,
     path: String,
-    time: String,
+    time: Option<String>,
 }
 
-fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64) -> Result {
+fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64, distance: f64) -> Vec<Result> {
     let mut reader = quick_xml::Reader::from_file(&path).unwrap();
     reader.trim_text(true);
     let mut buf = Vec::new();
 
+    let mut results = Vec::new();
     let mut nearest_dist = std::f64::MAX;
     let mut time_update = false;
     let mut nearest_time = String::new();
@@ -75,20 +71,35 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64) -> Result {
                         nearest_dist = dist;
                         time_update = true;
                     }
+                    if dist <= distance {
+                        results.push(Result {
+                            distance: dist,
+                            path: path.to_str().unwrap().to_string(),
+                            time: None,
+                        });
+                    }
                 } else if e.name().eq(b"time") && time_update {
                     let time = reader.read_text(e.name(), &mut Vec::new()).unwrap();
-                    //dbg!(&time);
-                    nearest_time = time;
+                    nearest_time = time.clone();
+                    if let Some(last) = results.last_mut() {
+                        if last.time.is_none() {
+                            last.time = Some(time);
+                        }
+                    }
                 }
             }
 
             Ok(quick_xml::events::Event::Text(_)) => {}
             Ok(quick_xml::events::Event::Eof) => {
-                return Result {
-                    distance: nearest_dist,
-                    path: path.to_str().unwrap().into(),
-                    time: nearest_time,
-                };
+                if results.len() > 0 {
+                    return results;
+                } else {
+                    return vec![Result {
+                        distance: nearest_dist,
+                        path: path.to_str().unwrap().into(),
+                        time: Some(nearest_time),
+                    }];
+                }
             }
             Err(e) => panic!(
                 "Error in file \"{}\", at position {}: {:?}",
@@ -131,7 +142,8 @@ fn parse_deg_min_sec(input: String) -> f64 {
         .map(|str| str.to_string())
         .collect::<Vec<_>>();
     let mut param = split.remove(0);
-    let south = param.remove(0).eq(&'S');
+    let dir_param = param.remove(0);
+    let south = dir_param.eq(&'S') || dir_param.eq(&'W');
 
     let mut out =
         param.parse::<f64>().unwrap() + split.get(0).unwrap().parse::<f64>().unwrap() / 60.0;
@@ -142,11 +154,16 @@ fn parse_deg_min_sec(input: String) -> f64 {
 }
 
 fn print_result(result: &Result) {
-    let mut time_split = result.time.split("T");
-    let date = time_split.next().unwrap();
-    let mut time = time_split.next().unwrap().to_string();
-    time.remove(time.len() - 1);
-    println!("{:.1};{};{};{}", result.distance, time, date, result.path);
+    if result.time.is_some() {
+        let time = result.time.as_ref().unwrap();
+        let mut time_split = time.split("T");
+        let date = time_split.next().unwrap();
+        let mut time = time_split.next().unwrap().to_string();
+        time.remove(time.len() - 1);
+        println!("{:.1};{};{};{}", result.distance, time, date, result.path);
+    } else {
+        println!("{:.1};{};{};{}", result.distance, "00:00:00", "0000-00-00", result.path);
+    }
 }
 
 fn main() {
@@ -183,6 +200,8 @@ fn main() {
             panic!("You must specify either --longitude and --latitude or --coordinates");
         };
 
+    dbg!(latitude, longitude);
+
     if opt.threads.is_some() {
         rayon::ThreadPoolBuilder::new()
             .num_threads(opt.threads.unwrap())
@@ -198,10 +217,13 @@ fn main() {
         analyze_db.len()
     );
 
-    let mut results = analyze_db
+    let distance = opt.distance;
+    let analysis_results = analyze_db
         .par_iter()
-        .map(|gpx_file| analyze(gpx_file, longitude, latitude))
+        .map(|gpx_file| analyze(gpx_file, longitude, latitude, distance))
         .collect::<Vec<_>>();
+    let mut results = Vec::with_capacity(analysis_results.iter().map(|result_vec| result_vec.len()).sum());
+    analysis_results.iter().for_each(|result| results.extend(result));
 
     results
         .sort_by(|result_1, result_2| result_1.distance.partial_cmp(&result_2.distance).unwrap());
@@ -214,7 +236,8 @@ fn main() {
 
     if filtered_results.len() > 0 {
         println!(
-            "Found {} point(s) in your defined minimum distance ({}m):",
+            "Found {} point(s) in your defined minimum distance ({}m):\n\
+            dist;time;date;path",
             filtered_results.len(),
             opt.distance
         );
@@ -232,7 +255,8 @@ fn main() {
     } else {
         println!(
             "Did not find any point in your defined minimum distance.\n\
-            Closest was:"
+            Closest was:\n\
+            dist;time;date;path"
         );
         std::mem::drop(filtered_results);
         print_result(results.first().unwrap());
