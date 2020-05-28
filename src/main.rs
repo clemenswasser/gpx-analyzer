@@ -9,7 +9,7 @@ struct Opt {
     #[structopt(long, conflicts_with = "coordinates")]
     pub latitude: Option<String>,
     #[structopt(short, long, conflicts_with = "longitude latitude")]
-    pub coordinates: Option<String>,
+    pub coordinate: Option<String>,
     #[structopt(short, long)]
     pub distance: f64,
     #[structopt(short, long)]
@@ -30,9 +30,9 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64, distance: f64) -> Vec<
     let mut buf = Vec::new();
 
     let mut results = Vec::new();
-    let mut nearest_dist = std::f64::MAX;
+    let mut nearest: Option<Result> = None;
     let mut time_update = false;
-    let mut nearest_time = None;
+    let mut searching_time_for = std::usize::MAX;
 
     loop {
         match reader.read_event(&mut buf) {
@@ -67,41 +67,57 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64, distance: f64) -> Vec<
 
                     let dist = geo_types::Point::new(lon, lat).haversine_distance(&pt);
 
-                    if nearest_dist > dist {
-                        nearest_dist = dist;
+                    if (nearest.is_none() || nearest.as_ref().unwrap().distance > dist)
+                        && dist > distance
+                    {
+                        nearest = Some(Result {
+                            distance: dist,
+                            path: path.to_str().unwrap().to_string(),
+                            time: None,
+                        });
                         time_update = true;
                     }
+
                     if dist <= distance {
                         results.push(Result {
                             distance: dist,
                             path: path.to_str().unwrap().to_string(),
                             time: None,
                         });
+                        searching_time_for = results.len() - 1;
                     }
-                } else if e.name().eq(b"time") && time_update {
+                } else if e.name().eq(b"time") {
                     let time = reader.read_text(e.name(), &mut Vec::new()).unwrap();
-                    if time.eq("") {
-                        continue;
-                    }
-                    nearest_time = Some(time.clone());
-                    if let Some(last) = results.last_mut() {
-                        if last.time.is_none() {
-                            last.time = Some(time);
+                    if !time.eq("") {
+                        if let Some(time_for) = results.get_mut(searching_time_for) {
+                            time_for.time = Some(time);
+                        } else if time_update {
+                            nearest.as_mut().unwrap().time = Some(time);
                         }
                     }
+                    time_update = false;
                 }
             }
-
+            Ok(quick_xml::events::Event::End(e)) => {
+                if e.name().eq(b"trkpt") {
+                    searching_time_for = std::usize::MAX;
+                }
+            }
             Ok(quick_xml::events::Event::Text(_)) => {}
             Ok(quick_xml::events::Event::Eof) => {
                 if results.len() > 0 {
+                    if let Some(nearest) = nearest {
+                        results.push(nearest);
+                    }
                     return results;
+                } else if let Some(nearest) = nearest {
+                    return vec![nearest];
                 } else {
-                    return vec![Result {
-                        distance: nearest_dist,
-                        path: path.to_str().unwrap().into(),
-                        time: nearest_time,
-                    }];
+                    eprintln!(
+                        "[Warning] No points in file: \"{}\"",
+                        path.to_str().unwrap()
+                    );
+                    return vec![];
                 }
             }
             Err(e) => panic!(
@@ -187,7 +203,7 @@ fn main() {
                     Err(_) => parse_deg_min_sec(longitude),
                 },
             )
-        } else if let Some(coordinates) = opt.coordinates {
+        } else if let Some(coordinates) = opt.coordinate {
             let split = coordinates
                 .split(" ")
                 .map(|split| split.to_string())
@@ -234,9 +250,11 @@ fn main() {
             .map(|result_vec| result_vec.len())
             .sum(),
     );
-    analysis_results
-        .iter()
-        .for_each(|result| results.extend(result));
+    analysis_results.iter().for_each(|result| {
+        if result.len() > 0 {
+            results.extend(result);
+        }
+    });
 
     results
         .sort_by(|result_1, result_2| result_1.distance.partial_cmp(&result_2.distance).unwrap());
