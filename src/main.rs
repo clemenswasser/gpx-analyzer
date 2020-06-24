@@ -1,5 +1,4 @@
 use chrono::prelude::*;
-use geo::prelude::*;
 use rayon::prelude::*;
 use structopt::StructOpt;
 
@@ -26,7 +25,14 @@ struct GpxResult {
     time: Option<String>,
 }
 
-fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64, distance: f64) -> Vec<GpxResult> {
+fn analyze(
+    path: &std::path::PathBuf,
+    lon: f64,
+    lat: f64,
+    deg_lon_to_dist: f64,
+    deg_lat_to_dist: f64,
+    distance: f64,
+) -> Vec<GpxResult> {
     let mut reader = quick_xml::Reader::from_file(&path).unwrap();
     reader.trim_text(true);
     let mut buf = Vec::new();
@@ -43,7 +49,7 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64, distance: f64) -> Vec<
         match reader.read_event(&mut buf) {
             Ok(quick_xml::events::Event::Start(ref e)) => {
                 if e.name().eq(b"trkpt") {
-                    let pt = geo_types::Point::new(
+                    let (found_lon, found_lat) = (
                         match e.attributes().find(|e| match e {
                             Ok(attr) => attr.key == b"lon",
                             Err(_) => false,
@@ -126,12 +132,30 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64, distance: f64) -> Vec<
                         },
                     );
 
-                    let dist = match last_point {
-                        Some(last_point) => {
-                            let line = geo_types::Line::new(last_point, pt);
-                            geo_types::Point::new(lon, lat).euclidean_distance(&line)
+                    let d_lon = found_lon - lon;
+                    let d_lat = found_lat - lat;
+                    let x = (d_lon) * deg_lon_to_dist;
+                    let y = (d_lat) * deg_lat_to_dist;
+
+                    let dist = if let Some((last_x, last_y)) = last_point {
+                        let d_x = x - last_x;
+                        let d_y: f64 = y - last_y;
+
+                        let a = d_y.atan2(d_x) * -1.0;
+
+                        let dist = (-x * a.sin() + y * a.cos()).abs();
+
+                        let last_t_x = last_x * a.cos() + last_y * a.sin();
+
+                        let t_x = x * a.cos() + y * a.sin();
+
+                        if (last_t_x >= 0.0 && t_x <= 0.0) || (last_t_x <= 0.0 && t_x >= 0.0) {
+                            dist
+                        } else {
+                            (x * x + y * y).sqrt()
                         }
-                        None => geo_types::Point::new(lon, lat).haversine_distance(&pt),
+                    } else {
+                        (x * x + y * y).sqrt()
                     };
 
                     if (nearest.is_none() || nearest.as_ref().unwrap().distance > dist)
@@ -161,7 +185,7 @@ fn analyze(path: &std::path::PathBuf, lon: f64, lat: f64, distance: f64) -> Vec<
                         });
                         searching_time_for = new_results.len() - 1;
                     }
-                    last_point = Some(pt);
+                    last_point = Some((x, y));
                 } else if e.name().eq(b"time") {
                     in_time = true;
                 }
@@ -334,6 +358,14 @@ fn main() {
             panic!("You must specify either --longitude and --latitude or --coordinates");
         };
 
+    let deg_lon_to_dist: f64 = 6_356_752.314_245 * 2.0 * std::f64::consts::PI / 360.0
+        * (latitude * std::f64::consts::PI / 180.0).cos();
+
+    let deg_lat_to_dist: f64 = 6_378_137.0 * 2.0 * std::f64::consts::PI / 360.0
+        * (longitude * std::f64::consts::PI / 180.0).cos();
+
+    println!("{}, {}", deg_lat_to_dist, deg_lon_to_dist);
+
     println!("{}, {}", latitude, longitude);
     println!(
         "{} {}° {:.6} {} {}° {:.6}",
@@ -371,7 +403,16 @@ fn main() {
     let distance = opt.distance;
     let analysis_results = analyze_db
         .par_iter()
-        .map(|gpx_file| analyze(gpx_file, longitude, latitude, distance))
+        .map(|gpx_file| {
+            analyze(
+                gpx_file,
+                longitude,
+                latitude,
+                deg_lon_to_dist,
+                deg_lat_to_dist,
+                distance,
+            )
+        })
         .collect::<Vec<_>>();
     let mut results = Vec::with_capacity(
         analysis_results
@@ -421,8 +462,6 @@ fn main() {
         std::mem::drop(filtered_results);
         print_result(results.first().unwrap());
     } else {
-        println!(
-            "Did not find any points."
-        );
+        println!("Did not find any points.");
     }
 }
