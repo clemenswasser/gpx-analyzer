@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use chrono::prelude::*;
 use clap::Clap;
 use rayon::prelude::*;
@@ -18,7 +20,7 @@ struct Opt {
     #[clap(short = 'j', long)]
     pub threads: Option<usize>,
     #[clap(name = "PATH")]
-    pub path: Option<std::path::PathBuf>,
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -29,7 +31,7 @@ struct GpxResult {
 }
 
 fn analyze(
-    path: &std::path::Path,
+    path: &Path,
     lat: f64,
     lon: f64,
     deg_lat_to_dist: f64,
@@ -232,25 +234,18 @@ fn analyze(
     }
 }
 
-fn read_dir_db(path: std::path::PathBuf) -> Vec<std::path::PathBuf> {
-    if std::fs::metadata(&path).unwrap().is_dir() {
-        let dir_entrys = std::fs::read_dir(path).unwrap();
-        let mut results = Vec::<std::path::PathBuf>::new();
+fn read_dir_db(path: PathBuf, analyze_db: &mut Vec<PathBuf>) {
+    if let Ok(dir_entrys) = std::fs::read_dir(path) {
         for dir_entry in dir_entrys {
             let dir_entry = dir_entry.unwrap();
             if dir_entry.metadata().unwrap().is_dir() {
-                results.extend(read_dir_db(dir_entry.path()));
+                read_dir_db(dir_entry.path(), analyze_db);
             } else if let Some(ext) = dir_entry.path().extension() {
                 if ext.eq("gpx") {
-                    results.push(dir_entry.path());
+                    analyze_db.push(dir_entry.path());
                 }
             }
         }
-        results
-    } else if path.extension().unwrap().eq("gpx") {
-        vec![path]
-    } else {
-        panic!("Your specified Path is neither a directory nor a gpx file");
     }
 }
 
@@ -332,8 +327,8 @@ fn main() {
         };
 
     // WGS-84: https://en.wikipedia.org/wiki/World_Geodetic_System#WGS84
-    
-    let deg_lat_to_dist: f64 = 6_378_137.0_f64.to_radians() * longitude.to_radians().cos();    
+
+    let deg_lat_to_dist: f64 = 6_378_137.0_f64.to_radians() * longitude.to_radians().cos();
     let deg_lon_to_dist: f64 = 6_356_752.314_245_18_f64.to_radians() * latitude.to_radians().cos();
 
     println!("{}, {}", latitude, longitude);
@@ -362,10 +357,15 @@ fn main() {
             .unwrap();
     }
 
-    let analyze_db = read_dir_db(
-        opt.path
-            .unwrap_or_else(|| std::env::current_dir().expect("Get current dir")),
-    );
+    let analyze_db = {
+        let mut analyze_db = Vec::new();
+        read_dir_db(
+            opt.path
+                .unwrap_or_else(|| std::env::current_dir().expect("Get current dir")),
+            &mut analyze_db,
+        );
+        analyze_db
+    };
 
     println!(
         "Found {} gpx file(s)\n\
