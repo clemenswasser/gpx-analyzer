@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    process,
+};
 
 use chrono::prelude::*;
 use clap::Clap;
@@ -7,18 +10,14 @@ use rayon::prelude::*;
 #[derive(Debug, Clap)]
 #[clap(name = "gpx-analyzer")]
 struct Opt {
-    #[clap(long, conflicts_with = "coordinate")]
-    /// Longitude in degrees
-    pub longitude: Option<String>,
-    #[clap(long, conflicts_with = "coordinate")]
-    /// Latitude in degrees
-    pub latitude: Option<String>,
-    #[clap(short, long, conflicts_with = "longitude", conflicts_with = "latitude")]
-    pub coordinate: Option<String>,
+    #[clap(short, long, allow_hyphen_values = true)]
+    pub coordinate: String,
     #[clap(short, long)]
     pub distance: f64,
     #[clap(short = 'j', long)]
     pub threads: Option<usize>,
+    #[clap(short, long)]
+    pub recursive: bool,
     #[clap(name = "PATH")]
     pub path: Option<PathBuf>,
 }
@@ -55,77 +54,34 @@ fn analyze(
             Ok(quick_xml::events::Event::Start(ref e)) => {
                 if e.name().eq(b"trkpt") {
                     let (found_lon, found_lat) = (
-                        match e.attributes().find(|e| match e {
-                            Ok(attr) => attr.key == b"lon",
-                            Err(_) => false,
-                        }) {
-                            Some(attr) => {
-                                if let Ok(val) = if let Ok(val) = if let Ok(val) = attr {
-                                    val
-                                } else {
-                                    eprintln!(
-                                        "[WARNING] Invalid longitude in file: {}",
-                                        path.to_str().unwrap()
-                                    );
-                                    continue;
-                                }
-                                .unescape_and_decode_value(&reader)
-                                {
-                                    val
-                                } else {
-                                    eprintln!(
-                                        "[WARNING] Invalid longitude in file: {}",
-                                        path.to_str().unwrap()
-                                    );
-                                    continue;
-                                }
-                                .parse::<f64>()
-                                {
-                                    val
-                                } else {
-                                    eprintln!(
-                                        "[WARNING] Invalid longitude in file: {}",
-                                        path.to_str().unwrap()
-                                    );
-                                    continue;
-                                }
-                            }
-                            None => continue,
-                        },
-                        if let Some(attr) = e.attributes().find(|e| match e {
-                            Ok(attr) => attr.key == b"lat",
-                            Err(_) => false,
-                        }) {
-                            if let Ok(val) = if let Ok(val) = if let Ok(val) = attr {
-                                val
-                            } else {
-                                eprintln!(
-                                    "[WARNING] Invalid latitude in file: {}",
-                                    path.to_str().unwrap()
-                                );
-                                continue;
-                            }
-                            .unescape_and_decode_value(&reader)
-                            {
-                                val
-                            } else {
-                                eprintln!(
-                                    "[WARNING] Invalid latitude in file: {}",
-                                    path.to_str().unwrap()
-                                );
-                                continue;
-                            }
-                            .parse::<f64>()
-                            {
-                                val
-                            } else {
-                                eprintln!(
-                                    "[WARNING] Invalid latitude in file: {}",
-                                    path.to_str().unwrap()
-                                );
-                                continue;
-                            }
+                        if let Some(attr) = e
+                            .attributes()
+                            .find(|e| e.as_ref().map_or(false, |attr| attr.key == b"lon"))
+                            .and_then(Result::ok)
+                            .and_then(|attr| attr.unescape_and_decode_value(&reader).ok())
+                            .and_then(|attr| attr.parse::<f64>().ok())
+                        {
+                            attr
                         } else {
+                            eprintln!(
+                                "[WARNING] Invalid longitude in file: {}",
+                                path.to_str().unwrap()
+                            );
+                            continue;
+                        },
+                        if let Some(attr) = e
+                            .attributes()
+                            .find(|e| e.as_ref().map_or(false, |attr| attr.key == b"lat"))
+                            .and_then(Result::ok)
+                            .and_then(|attr| attr.unescape_and_decode_value(&reader).ok())
+                            .and_then(|attr| attr.parse::<f64>().ok())
+                        {
+                            attr
+                        } else {
+                            eprintln!(
+                                "[WARNING] Invalid latitude in file: {}",
+                                path.to_str().unwrap()
+                            );
                             continue;
                         },
                     );
@@ -150,10 +106,10 @@ fn analyze(
                         if (last_t_x >= 0.0 && t_x <= 0.0) || (last_t_x <= 0.0 && t_x >= 0.0) {
                             dist
                         } else {
-                            f64::hypot(x, y).sqrt()
+                            f64::hypot(x, y)
                         }
                     } else {
-                        f64::hypot(x, y).sqrt()
+                        f64::hypot(x, y)
                     };
 
                     if (nearest.is_none() || nearest.as_ref().unwrap().distance > dist)
@@ -234,12 +190,12 @@ fn analyze(
     }
 }
 
-fn read_dir_db(path: PathBuf, analyze_db: &mut Vec<PathBuf>) {
+fn read_dir_db(path: impl AsRef<Path>, analyze_db: &mut Vec<PathBuf>, recursive: bool) {
     if let Ok(dir_entrys) = std::fs::read_dir(path) {
         for dir_entry in dir_entrys {
             let dir_entry = dir_entry.unwrap();
-            if dir_entry.metadata().unwrap().is_dir() {
-                read_dir_db(dir_entry.path(), analyze_db);
+            if recursive && dir_entry.metadata().unwrap().is_dir() {
+                read_dir_db(dir_entry.path(), analyze_db, recursive);
             } else if let Some(ext) = dir_entry.path().extension() {
                 if ext.eq("gpx") {
                     analyze_db.push(dir_entry.path());
@@ -271,60 +227,48 @@ fn parse_deg_min_sec(mut input: String) -> f64 {
 }
 
 fn print_result(result: &GpxResult) {
-    if result.time.is_some() {
-        let time = result
-            .time
-            .as_ref()
-            .unwrap()
-            .parse::<DateTime<Utc>>()
-            .unwrap()
-            .with_timezone(&chrono::offset::Local);
+    if let Some(time) = result
+        .time
+        .as_ref()
+        .and_then(|time_str| time_str.parse::<DateTime<Utc>>().ok())
+    {
+        let time_in_local_timezone = time.with_timezone(&chrono::offset::Local);
         println!(
             "{:.1};{};{};{}",
             result.distance,
-            time.time().to_string(),
-            time.date().to_string(),
+            time_in_local_timezone.time().to_string(),
+            time_in_local_timezone.date().to_string(),
             result.path
         );
     } else {
-        println!("{:.1};00:00:00;0000-00-00;{}", result.distance, result.path);
+        println!("{:.1};;;{}", result.distance, result.path);
     }
 }
 
 fn main() {
     let opt = Opt::parse();
 
-    let (latitude, longitude) =
-        if let (Some(latitude), Some(longitude)) = (opt.latitude, opt.longitude) {
-            (
-                latitude
-                    .parse::<f64>()
-                    .unwrap_or_else(|_| parse_deg_min_sec(latitude)),
-                longitude
-                    .parse::<f64>()
-                    .unwrap_or_else(|_| parse_deg_min_sec(longitude)),
-            )
-        } else if let Some(coordinates) = opt.coordinate {
-            let split = coordinates
-                .split(' ')
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-            if let (Ok(latitude), Ok(longitude)) = (
-                split.get(0).unwrap().replace(",", "").parse::<f64>(),
-                split.get(1).unwrap().replace(",", "").parse::<f64>(),
-            ) {
-                (latitude, longitude)
-            } else {
-                let (first, second) = coordinates.split_at(coordinates.len() / 2);
-
-                (
-                    parse_deg_min_sec(first.to_string()),
-                    parse_deg_min_sec(second.to_string()),
-                )
-            }
+    let (latitude, longitude) = {
+        if let Some((Ok(latitude), Ok(longitude))) =
+            opt.coordinate
+                .split_once(' ')
+                .map(|(latitude_str, longitude_str)| {
+                    (
+                        latitude_str.replace(",", "").parse::<f64>(),
+                        longitude_str.replace(",", "").parse::<f64>(),
+                    )
+                })
+        {
+            (latitude, longitude)
         } else {
-            panic!("You must specify either --longitude and --latitude or --coordinates");
-        };
+            let (first, second) = opt.coordinate.split_at(opt.coordinate.len() / 2);
+
+            (
+                parse_deg_min_sec(first.to_string()),
+                parse_deg_min_sec(second.to_string()),
+            )
+        }
+    };
 
     // WGS-84: https://en.wikipedia.org/wiki/World_Geodetic_System#WGS84
 
@@ -357,21 +301,26 @@ fn main() {
             .unwrap();
     }
 
+    let path = opt
+        .path
+        .unwrap_or_else(|| std::env::current_dir().expect("Get current dir"));
+
+    if std::fs::metadata(&path).is_err() {
+        eprintln!(
+            "[Error] The Path `{}` does not exist",
+            path.to_str().unwrap()
+        );
+        process::exit(-1);
+    }
+
     let analyze_db = {
         let mut analyze_db = Vec::new();
-        read_dir_db(
-            opt.path
-                .unwrap_or_else(|| std::env::current_dir().expect("Get current dir")),
-            &mut analyze_db,
-        );
+        read_dir_db(&path, &mut analyze_db, opt.recursive);
         analyze_db
     };
 
-    println!(
-        "Found {} gpx file(s)\n\
-        Searching...",
-        analyze_db.len()
-    );
+    println!("Found {} gpx file(s)", analyze_db.len());
+    println!("Searching in `{}`...", path.to_str().unwrap(),);
 
     let distance = opt.distance;
     let mut results = analyze_db
